@@ -133,21 +133,54 @@ export type ParsedCode = ExpressionCode & { parsed: types.namedTypes.File };
 
 // This replaces any actual new lines with \n's. This only happens in
 // template strings.
+//
+// The rewritten template is wrapped in parentheses so that recast prints the
+// whole template afresh. Patching only the changed quasis back into the
+// original source lets recast's patcher insert a separating space between a
+// quasi ending in an identifier character and the following `${`, which would
+// end up inside the string (`chk_${x}` → `chk_ ${x}`).
 const fixStringNewLines = (node: types.namedTypes.File): types.namedTypes.File => {
 	const replace = (str: string): string => {
 		return str.replace(/\n/g, '\\n');
 	};
-	visit(node, {
-		visitTemplateElement(path) {
-			this.traverse(path);
-			const el = b.templateElement(
+	const rewritten = new WeakSet<object>();
+
+	const rewriteTemplate = (literal: namedTypes.TemplateLiteral): namedTypes.TemplateLiteral => {
+		const quasis = literal.quasis.map((quasi) =>
+			b.templateElement(
 				{
-					cooked: path.node.value.cooked === null ? null : replace(path.node.value.cooked),
-					raw: replace(path.node.value.raw),
+					cooked: quasi.value.cooked === null ? null : replace(quasi.value.cooked ?? ''),
+					raw: replace(quasi.value.raw),
 				},
-				path.node.tail,
+				quasi.tail,
+			),
+		);
+		const result = b.templateLiteral(quasis, literal.expressions);
+		rewritten.add(result);
+		return result;
+	};
+
+	const hasNewLine = (literal: namedTypes.TemplateLiteral) =>
+		literal.quasis.some((quasi) => quasi.value.raw.includes('\n'));
+
+	visit(node, {
+		visitTaggedTemplateExpression(path) {
+			this.traverse(path);
+			if (!rewritten.has(path.node.quasi)) return;
+			path.replace(
+				b.parenthesizedExpression(b.taggedTemplateExpression(path.node.tag, path.node.quasi)),
 			);
-			path.replace(el);
+		},
+		visitTemplateLiteral(path) {
+			this.traverse(path);
+			if (rewritten.has(path.node) || !hasNewLine(path.node)) return;
+			const literal = rewriteTemplate(path.node);
+			// A tag needs its template directly, the tagged expression is wrapped instead
+			if (path.parent?.node?.type === 'TaggedTemplateExpression' && path.name === 'quasi') {
+				path.replace(literal);
+				return;
+			}
+			path.replace(b.parenthesizedExpression(literal));
 		},
 	});
 

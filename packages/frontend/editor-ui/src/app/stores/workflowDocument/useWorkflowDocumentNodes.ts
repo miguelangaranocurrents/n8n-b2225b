@@ -574,7 +574,9 @@ export function useWorkflowDocumentNodes(deps: WorkflowDocumentNodesDeps) {
 		invalid: INodeCredentialsDetails;
 		type: string;
 	}) {
-		nodes.value.forEach((node: INodeUi) => {
+		let anyChanged = false;
+
+		nodes.value.forEach((node: INodeUi, nodeIndex: number) => {
 			const nodeCredentials: INodeCredentials | undefined = (node as unknown as INode).credentials;
 			if (!nodeCredentials?.[data.type]) {
 				return;
@@ -582,25 +584,26 @@ export function useWorkflowDocumentNodes(deps: WorkflowDocumentNodesDeps) {
 
 			const nodeCredentialDetails: INodeCredentialsDetails | string = nodeCredentials[data.type];
 
-			if (
-				typeof nodeCredentialDetails === 'string' &&
-				nodeCredentialDetails === data.invalid.name
-			) {
-				(node.credentials as INodeCredentials)[data.type] = data.credentials;
-				return;
-			}
+			const isInvalid =
+				typeof nodeCredentialDetails === 'string'
+					? nodeCredentialDetails === data.invalid.name
+					: nodeCredentialDetails.id === null
+						? nodeCredentialDetails.name === data.invalid.name
+						: nodeCredentialDetails.id === data.invalid.id;
 
-			if (nodeCredentialDetails.id === null) {
-				if (nodeCredentialDetails.name === data.invalid.name) {
-					(node.credentials as INodeCredentials)[data.type] = data.credentials;
-				}
-				return;
-			}
+			if (!isInvalid) return;
 
-			if (nodeCredentialDetails.id === data.invalid.id) {
-				(node.credentials as INodeCredentials)[data.type] = data.credentials;
-			}
+			// Go through updateNodeAtIndex so the change is tracked (and saved) like
+			// any other node update, instead of mutating the node in place.
+			const changed = updateNodeAtIndex(nodeIndex, {
+				credentials: { ...nodeCredentials, [data.type]: data.credentials },
+			});
+			anyChanged ||= changed;
 		});
+
+		if (anyChanged) {
+			void onStateDirty.trigger();
+		}
 	}
 
 	// Assign credential to all nodes that support it but don't have it set
@@ -611,7 +614,7 @@ export function useWorkflowDocumentNodes(deps: WorkflowDocumentNodesDeps) {
 	}): number {
 		let updatedNodesCount = 0;
 
-		nodes.value.forEach((node: INodeUi) => {
+		nodes.value.forEach((node: INodeUi, nodeIndex: number) => {
 			// Skip the current node (it was just set)
 			if (node.name === data.currentNodeName) {
 				return;
@@ -649,11 +652,16 @@ export function useWorkflowDocumentNodes(deps: WorkflowDocumentNodesDeps) {
 			}
 
 			// Assign the same credential to the node
-			node.credentials ??= {} satisfies INodeCredentials;
-			node.credentials[data.type] = data.credentials;
+			const changed = updateNodeAtIndex(nodeIndex, {
+				credentials: { ...(node.credentials ?? {}), [data.type]: data.credentials },
+			});
 
-			updatedNodesCount++;
+			if (changed) updatedNodesCount++;
 		});
+
+		if (updatedNodesCount > 0) {
+			void onStateDirty.trigger();
+		}
 
 		return updatedNodesCount;
 	}
